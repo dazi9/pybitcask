@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pybitcask"
+version = "0.2.0"
+description = "Log-Structured Hash Table Key-Value Storage Engine in Pure Python (Bitcask paper + CaskDB enhanced reproduction)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "CS Sophomore Reproduction Project" }
+]
+keywords = ["database", "key-value", "bitcask", "storage-engine", "log-structured"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database :: Database Engines/Servers",
+]
+dependencies = []
+
+[project.scripts]
+pybitcask = "pybitcask.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
