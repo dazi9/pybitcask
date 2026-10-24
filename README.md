@@ -41,7 +41,7 @@ pybitcask/
 │       ├── memory_store.py      # 内存存储引擎（用于单元测试与基准对照）
 │       ├── server.py            # 多线程 HTTP REST/JSON 服务端
 │       └── cli.py               # 命令行工具与交互式 REPL Shell
-├── tests/                       # 46 项单元、集成、异常边界、并发与安全测试
+├── tests/                       # 52 项单元、集成、异常边界、并发与安全测试（含崩溃一致性回归 6 项）
 │   ├── test_format.py
 │   ├── test_keydir_and_cache.py
 │   ├── test_segment.py
@@ -67,7 +67,7 @@ PYTHONPATH=src python3 -W error -m unittest discover -s tests -v
 
 ### 方式二：使用 Makefile 快捷指令
 ```bash
-make test     # 运行全部 46 个单元测试、集成测试与边界安全测试
+make test     # 运行全部 52 个单元测试、集成测试与边界安全测试
 make bench    # 运行性能基准测试并输出 JSON 报告
 make repl     # 启动交互式 Bitcask REPL Shell
 make serve    # 启动 HTTP REST API 服务器 (默认 127.0.0.1:7379)
