@@ -116,9 +116,15 @@ class BitcaskEngine:
         self._active_file_id: int = 1
         self._active_segment: DataSegment
         self._active_dirty: bool = False
+        # Logical write clock: strictly increasing, seeded from recovered
+        # records. Wall-clock milliseconds alone cannot order two writes in
+        # the same millisecond (a delete immediately followed by a re-put
+        # would replay in the wrong order).
+        self._last_write_ts: int = 0
 
         try:
             self._initialize_storage()
+            self._last_write_ts = self.key_dir.max_timestamp()
         except Exception:
             for seg in self._segments.values():
                 seg.close()
@@ -258,6 +264,11 @@ class BitcaskEngine:
         if self._closed:
             raise DatabaseClosedError("BitcaskEngine is closed")
 
+    def _next_write_ts(self) -> int:
+        """Advance and return the logical write timestamp (strictly increasing)."""
+        self._last_write_ts = max(self._last_write_ts + 1, current_time_ms())
+        return self._last_write_ts
+
     @property
     def write_position(self) -> int:
         """Current write byte offset of the active segment file."""
@@ -288,7 +299,11 @@ class BitcaskEngine:
                 for k, entry in self.key_dir.items()
                 if entry.file_id == old_fid
             ]
-            DataSegment.write_hint_file(old_seg.path, live_in_old)
+            DataSegment.write_hint_file(
+                old_seg.path,
+                live_in_old,
+                tombstone_entries=self.key_dir.tombstone_entries_for_file(old_fid),
+            )
 
         new_fid = old_fid + 1
         new_path = segment_file_path(self.path, new_fid)
@@ -336,13 +351,13 @@ class BitcaskEngine:
         if ttl_ms is not None and ttl_ms <= 0:
             raise ValidationError(f"ttl_ms must be > 0, got {ttl_ms}")
 
-        now_ms = current_time_ms()
-        expire_at = (now_ms + ttl_ms) if ttl_ms is not None else 0
+        write_ts = self._next_write_ts()
+        expire_at = (current_time_ms() + ttl_ms) if ttl_ms is not None else 0
         val_bytes = value.encode("utf-8") if isinstance(value, str) else bytes(value)
         key_bytes = key.encode("utf-8")
 
         sz, raw = encode_record(
-            timestamp=now_ms,
+            timestamp=write_ts,
             key=key_bytes,
             value=val_bytes,
             is_tombstone=False,
@@ -357,7 +372,7 @@ class BitcaskEngine:
                 raw, len(key_bytes)
             )
             entry = KeyEntry(
-                timestamp=now_ms,
+                timestamp=write_ts,
                 position=rpos,
                 total_size=total_sz,
                 file_id=self._active_file_id,
@@ -430,8 +445,9 @@ class BitcaskEngine:
                 return False
 
             key_bytes = key.encode("utf-8")
+            write_ts = self._next_write_ts()
             sz, raw = encode_record(
-                timestamp=now_ms,
+                timestamp=write_ts,
                 key=key_bytes,
                 value=b"",
                 is_tombstone=True,
@@ -440,11 +456,13 @@ class BitcaskEngine:
                 max_value_size=self.config.max_value_size,
             )
             self._maybe_rotate_segment(sz)
-            _, _, total_sz = self._active_segment.append_bytes(raw, len(key_bytes))
+            rpos, _, total_sz = self._active_segment.append_bytes(raw, len(key_bytes))
             self.key_dir.delete(
                 key,
+                timestamp=write_ts,
                 tombstone_file_id=self._active_file_id,
                 tombstone_size=total_sz,
+                tombstone_pos=rpos,
             )
             self.cache.invalidate(key)
             self._active_dirty = True
@@ -467,8 +485,7 @@ class BitcaskEngine:
             Number of operations applied.
         """
         self._ensure_open()
-        now_ms = current_time_ms()
-        prepared: list[tuple[str, str, bytes, int, bytes, int]] = []
+        prepared: list[tuple[str, str, bytes, int, bytes, int, int]] = []
 
         for item in operations:
             if isinstance(item, BatchOperation):
@@ -488,7 +505,8 @@ class BitcaskEngine:
             if ttl_ms is not None and ttl_ms <= 0:
                 raise ValidationError("ttl_ms must be > 0")
 
-            expire_at = (now_ms + ttl_ms) if (op == "put" and ttl_ms is not None) else 0
+            write_ts = self._next_write_ts()
+            expire_at = (current_time_ms() + ttl_ms) if (op == "put" and ttl_ms is not None) else 0
             val_bytes = (
                 b""
                 if op == "delete"
@@ -496,7 +514,7 @@ class BitcaskEngine:
             )
             key_bytes = key.encode("utf-8")
             _, raw = encode_record(
-                timestamp=now_ms,
+                timestamp=write_ts,
                 key=key_bytes,
                 value=val_bytes,
                 is_tombstone=(op == "delete"),
@@ -504,7 +522,7 @@ class BitcaskEngine:
                 max_key_size=self.config.max_key_size,
                 max_value_size=self.config.max_value_size,
             )
-            prepared.append((op, key, key_bytes, expire_at, val_bytes, raw))
+            prepared.append((op, key, key_bytes, expire_at, val_bytes, raw, write_ts))
 
         if not prepared:
             return 0
@@ -514,7 +532,7 @@ class BitcaskEngine:
             # Defer per-record fsync until the entire batch has been appended
             self._active_segment.sync_policy = "os"
             try:
-                for op, key, key_bytes, expire_at, val_bytes, raw in prepared:
+                for op, key, key_bytes, expire_at, val_bytes, raw, write_ts in prepared:
                     self._maybe_rotate_segment(len(raw))
                     self._active_segment.sync_policy = "os"
                     rpos, vpos, total_sz = self._active_segment.append_bytes(
@@ -522,7 +540,7 @@ class BitcaskEngine:
                     )
                     if op == "put":
                         entry = KeyEntry(
-                            timestamp=now_ms,
+                            timestamp=write_ts,
                             position=rpos,
                             total_size=total_sz,
                             file_id=self._active_file_id,
@@ -535,8 +553,10 @@ class BitcaskEngine:
                     else:
                         self.key_dir.delete(
                             key,
+                            timestamp=write_ts,
                             tombstone_file_id=self._active_file_id,
                             tombstone_size=total_sz,
+                            tombstone_pos=rpos,
                         )
                         self.cache.invalidate(key)
             finally:
@@ -871,6 +891,7 @@ class BitcaskEngine:
                 self.logger.warning("Failed to unlink compacted segment %s: %s", old_seg.path, exc)
 
         self.key_dir.clear_dead_bytes_for_files(candidate_set)
+        self.key_dir.clear_tombstones_for_files(candidate_set)
         bytes_after = self.total_disk_bytes()
         return {
             "live_keys_migrated": migrated,
@@ -934,7 +955,11 @@ class BitcaskEngine:
                         if entry.file_id == self._active_file_id
                     ]
                     DataSegment.write_hint_file(
-                        self._active_segment.path, live_in_active
+                        self._active_segment.path,
+                        live_in_active,
+                        tombstone_entries=self.key_dir.tombstone_entries_for_file(
+                            self._active_file_id
+                        ),
                     )
                     self._active_dirty = False
                 elif (
@@ -943,7 +968,11 @@ class BitcaskEngine:
                     and self.single_file_mode
                     and self._active_segment.write_position > 0
                 ):
-                    DataSegment.write_hint_file(self.path, self.key_dir.items())
+                    DataSegment.write_hint_file(
+                        self.path,
+                        self.key_dir.items(),
+                        tombstone_entries=self.key_dir.tombstone_entries_for_file(1),
+                    )
                     self._active_dirty = False
 
                 for seg in self._segments.values():

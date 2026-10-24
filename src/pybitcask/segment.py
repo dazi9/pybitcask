@@ -221,7 +221,18 @@ class DataSegment:
         hpath = hint_file_path(self.path)
         if use_hint and hpath.exists():
             try:
-                return self._load_from_hint_file(hpath, keydir)
+                # A hint file may only be trusted while it exactly spans the
+                # current data file: records appended after the hint was written
+                # (hard crash without clean close) leave the file LARGER than the
+                # hint covers, and a torn-tail truncation leaves it SMALLER. In
+                # both cases trusting the stale hint would silently lose records.
+                if self._hint_covers_file(hpath):
+                    return self._load_from_hint_file(hpath, keydir)
+                self.logger.warning(
+                    "Hint file %s is stale relative to segment size; "
+                    "falling back to data scan",
+                    hpath,
+                )
             except CorruptDataError as exc:
                 self.logger.warning(
                     "Hint file %s is corrupt (%s); falling back to segment scan",
@@ -235,6 +246,38 @@ class DataSegment:
             skip_values=skip_values,
             recover_tail=recover_tail,
         )
+
+    def _hint_covers_file(self, hpath: Path) -> bool:
+        """Return True if the hint's recorded spans exactly cover the data file.
+
+        Parses hint headers only (positions/sizes live in the header), so the
+        check is O(record_count) without touching key or value payloads.
+        """
+        file_size = self.path.stat().st_size
+        raw = hpath.read_bytes()
+        offset = 0
+        max_end = 0
+        while offset < len(raw):
+            if offset + HINT_HEADER_SIZE > len(raw):
+                raise CorruptDataError(f"Truncated hint header in {hpath}")
+            header_bytes = raw[offset : offset + HINT_HEADER_SIZE]
+            (
+                _crc,
+                _ts,
+                _flags,
+                _exp,
+                key_size,
+                _vpos,
+                _vsz,
+                record_pos,
+                record_size,
+            ) = decode_hint_header(header_bytes)
+            key_end = offset + HINT_HEADER_SIZE + key_size
+            if key_end > len(raw):
+                raise CorruptDataError(f"Truncated hint key in {hpath}")
+            max_end = max(max_end, record_pos + record_size)
+            offset = key_end
+        return max_end == file_size
 
     def _load_from_hint_file(self, hpath: Path, keydir: KeyDir) -> int:
         raw = hpath.read_bytes()
@@ -265,8 +308,10 @@ class DataSegment:
             if hint.flags & FLAG_TOMBSTONE:
                 keydir.delete(
                     hint.key,
+                    timestamp=hint.timestamp,
                     tombstone_file_id=self.file_id,
                     tombstone_size=hint.record_size,
+                    tombstone_pos=hint.record_pos,
                 )
             else:
                 entry = KeyEntry(
@@ -375,8 +420,10 @@ class DataSegment:
                 if flags & FLAG_TOMBSTONE:
                     keydir.delete(
                         key,
+                        timestamp=timestamp,
                         tombstone_file_id=self.file_id,
                         tombstone_size=total_size,
+                        tombstone_pos=offset,
                     )
                 else:
                     entry = KeyEntry(
@@ -410,8 +457,13 @@ class DataSegment:
     def write_hint_file(
         segment_path: Path,
         entries: Iterable[tuple[str, KeyEntry]],
+        tombstone_entries: Iterable[tuple[str, KeyEntry]] = (),
     ) -> Path:
-        """Write an atomic `.hint` file for all given `(key, KeyEntry)` pairs."""
+        """Write an atomic `.hint` file for all given `(key, KeyEntry)` pairs.
+
+        `tombstone_entries` carries the segment's own tombstone records so the
+        hint is a complete replay surrogate for the segment (deletes included).
+        """
         hpath = hint_file_path(segment_path)
         tmp_path = hpath.with_suffix(".hint.tmp")
         with open(tmp_path, "wb") as hf:
@@ -423,6 +475,18 @@ class DataSegment:
                     expire_at=entry.expire_at,
                     value_pos=entry.value_pos,
                     value_size=entry.value_size,
+                    record_pos=entry.position,
+                    record_size=entry.total_size,
+                    key=key,
+                )
+                hf.write(raw)
+            for key, entry in tombstone_entries:
+                raw = encode_hint_record(
+                    timestamp=entry.timestamp,
+                    flags=FLAG_TOMBSTONE,
+                    expire_at=0,
+                    value_pos=0,
+                    value_size=0,
                     record_pos=entry.position,
                     record_size=entry.total_size,
                     key=key,
