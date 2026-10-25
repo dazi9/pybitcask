@@ -5,11 +5,11 @@
 本项目完全使用 **Python 3 标准库（零第三方运行时依赖）** 构建，不仅 100% 兼容 `py-caskdb` 的核心接口、修复了原仓库的多字节 UTF-8 编码截断与缓冲区切片 Bug，还完整实现了原仓库 README 中留作进阶挑战的 **Level 1 / Level 2 / Level 3 核心特性**：
 - **IEEE CRC32 数据完整性校验**与**崩溃尾记录自动截断恢复（Torn-Write Recovery）**
 - **Tombstone 墓碑标记删除**与 **毫秒级 TTL 自动过期（惰性淘汰 + 主动巡检）**
-- **多段文件自动轮转（Segment Rotation）**与**在线垃圾回收压缩（Merge / Compaction）**
-- **Hint 索引文件（`.hint`）**与 **`lseek` 跳过 Value 扫描优化**，实现毫秒级冷启动
+- **多段文件自动轮转（Segment Rotation）** 与**在线垃圾回收压缩（Merge / Compaction）**
+- **Hint 索引文件（`.hint`）** 与 **`lseek` 跳过 Value 扫描优化**，实现毫秒级冷启动
 - **基于 `os.pread` 的单系统调用位置读取**与 **O(1) 线程安全 LRU 读缓存**
 - **原子校验批量写入（`batch_write`）**、**有序前缀/范围扫描（`scan_prefix` / `scan_range`）**、**JSON 文档存取**
-- **交互式 REPL 命令行工具（`cli.py`）**与**多线程 HTTP REST API 服务端（`server.py`）**
+- **交互式 REPL 命令行工具（`cli.py`）** 与**多线程 HTTP REST API 服务端（`server.py`）**
 
 ---
 
