@@ -7,7 +7,7 @@
 - **Tombstone 墓碑标记删除**与 **毫秒级 TTL 自动过期（惰性淘汰 + 主动巡检）**
 - **多段文件自动轮转（Segment Rotation）**与**在线垃圾回收压缩（Merge / Compaction）**
 - **Hint 索引文件（`.hint`）**与 **`lseek` 跳过 Value 扫描优化**，实现毫秒级冷启动
-- **基于 `os.pread` 的单系统调用位置读取**与 **$O(1)$ 线程安全 LRU 读缓存**
+- **基于 `os.pread` 的单系统调用位置读取**与 **O(1) 线程安全 LRU 读缓存**
 - **原子校验批量写入（`batch_write`）**、**有序前缀/范围扫描（`scan_prefix` / `scan_range`）**、**JSON 文档存取**
 - **交互式 REPL 命令行工具（`cli.py`）**与**多线程 HTTP REST API 服务端（`server.py`）**
 
@@ -169,9 +169,9 @@ curl http://127.0.0.1:7379/stats
 | **数据完整性校验** | 无校验，磁盘位翻转无法检测 | 每条数据记录与 Hint 记录均包含 **4B IEEE CRC32 校验和** |
 | **崩溃尾记录恢复** | 无，末尾半条记录会导致启动崩溃 | 支持 `recover_tail=True`，自动检测并 `os.truncate` 截断崩溃残留尾记录 |
 | **删除机制 (`delete`)** | 无 `delete` 接口（测试中用设为空字符串代替，Key 永久驻留内存） | 完整实现 **Tombstone（墓碑标志 `0x01`）** 追写与内存移除，重启后墓碑生效 |
-| **TTL 自动过期** | 不支持 | 支持毫秒级 `expire_at`，结合惰性淘汰与 `$O(T)$` TTL 集合主动清理 |
+| **TTL 自动过期** | 不支持 | 支持毫秒级 `expire_at`，结合惰性淘汰与 `O(T)` TTL 集合主动清理 |
 | **启动加载机制** | 全量读取所有 Value 并 `print` 到终端，大文件启动极慢 | 支持 **`.hint` 索引文件直读（提速 3.5x+）** 与 **`lseek` 跳过 Value 扫描** |
-| **读取系统调用** | `file.seek()` + `file.read()`（两次操作且改变文件偏移） | 使用 POSIX **`os.pread()`** 单系统调用位置读取 + **$O(1)$ LRU 缓存** |
+| **读取系统调用** | `file.seek()` + `file.read()`（两次操作且改变文件偏移） | 使用 POSIX **`os.pread()`** 单系统调用位置读取 + **O(1) LRU 缓存** |
 | **多文件与垃圾回收** | 单文件无限膨胀，历史旧值无法回收 | 支持 `max_segment_size` 自动分段轮转 + **`compact()` 在线垃圾回收（实测回收 92.5% 空间）** |
 | **外围工具生态** | 仅库代码 | 提供 CLI 子命令、交互式 REPL Shell、多线程 HTTP REST 服务端 |
 
@@ -181,11 +181,11 @@ curl http://127.0.0.1:7379/stats
 
 ### 已知限制 (Known Limitations)
 1. **全键内存约束（Bitcask 架构固有特性）**：`KeyDir` 必须在内存中维护所有活跃 Key 的元数据，因此数据库可容纳的 Key 总数受限于机器物理内存大小（但 Value 总量可远超内存大小）。
-2. **范围扫描复杂度**：由于底层主索引为哈希表，前缀扫描（`scan_prefix`）与范围扫描（`scan_range`）需要对活跃 Key 集合进行过滤与排序（时间复杂度 $O(N + K \log K)$），不如 B+ 树或 LSM-Tree（跳表 + SSTable）原生有序高效。
+2. **范围扫描复杂度**：由于底层主索引为哈希表，前缀扫描（`scan_prefix`）与范围扫描（`scan_range`）需要对活跃 Key 集合进行过滤与排序（时间复杂度 O(N + K log K)），不如 B+ 树或 LSM-Tree（跳表 + SSTable）原生有序高效。
 3. **单写多读模型**：写操作通过引擎级可重入锁（`RLock`）串行化追加到活跃段文件，跨进程并发依赖文件锁互斥，不支持多进程同时写入同一目录。
 
 ### 后续继续开发 TODO 清单
-- [ ] **TODO 1（索引有序化）**：在 `KeyDir` 中引入跳表（SkipList）或 B-Tree 二级有序键索引，使 `scan_range` / `scan_prefix` 达到 $O(\log N + K)$ 复杂度。
+- [ ] **TODO 1（索引有序化）**：在 `KeyDir` 中引入跳表（SkipList）或 B-Tree 二级有序键索引，使 `scan_range` / `scan_prefix` 达到 O(log N + K) 复杂度。
 - [ ] **TODO 2（内存映射读取）**：为只读归档段（Immutable Segments）增加可选的 `mmap` 映射读取通道，减少内核态到用户态的缓冲区拷贝。
 - [ ] **TODO 3（后台异步 Compaction 线程）**：支持后台守护线程在低负载窗口自动执行分段式增量 Merge，降低大段合并时的写抖动。
 - [ ] **TODO 4（二进制 Value 压缩）**：利用标准库 `zlib` / `lzma` 在 Record Flags 中增加 `FLAG_COMPRESSED = 0x04`，对大于 1 KiB 的文本/JSON Value 自动进行透明压缩存储。
